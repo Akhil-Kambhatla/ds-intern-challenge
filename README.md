@@ -1,38 +1,52 @@
 # SignalDesk weekly check
 
+A command line script that reads a week of SignalDesk usage data and reports what
+can and cannot be concluded from it.
+
+**Who it is for:** the product teammate who owns SignalDesk and has to decide
+whether the recent prompt change worked. It is built to be run once a week
+against a fresh export.
+
 ## The problem
 
-The SignalDesk team changed a prompt on 2026-08-04 and a review policy on
-2026-08-07. They have one week of usage data, 41 rows across seven days, and want
-to know whether anything improved.
+SignalDesk runs three AI assisted workflows for internal teams. Lead summary
+helps Sales summarise inbound leads. Reply draft helps Support write responses a
+human then edits. Feedback clustering helps Product group user feedback into
+themes.
 
-The export makes that hard. Some rows are not real runs. Some columns look like
-quality signals but measure something else. And the prompt change landed three
-days into a seven day window.
+The team changed a prompt on 2026-08-04 and a review policy on 2026-08-07. They
+have one week of usage data, 41 rows across seven days, and want to know whether
+anything improved.
+
+The export makes that hard to answer. Some rows are not real runs. Some columns
+look like quality signals but measure something else. The prompt change landed
+three days into a seven day window.
 
 ## Why it matters
 
 Model confidence rose after the prompt change. On its own that reads as evidence
-the change worked, and it is the sort of number that ends up in a summary for
+the change worked, and it is the kind of number that reaches a summary for
 leadership. Acting on it means rolling out a change that has not been shown to do
 anything.
 
-There is a smaller repeating cost too. Someone has to look at this export every
-week and decide by eye which rows to ignore and which numbers to believe. Those
-decisions come out differently each time and the reasoning is not written down.
+There is a smaller repeating cost. Someone has to look at this export every week
+and decide by eye which rows to ignore and which numbers to believe. Those
+decisions come out differently each time and the reasoning is not written down
+anywhere.
 
 ## The approach
 
-A command line script that uses simple arithmetic and basic statistics to surface
-what the raw table hides, and to make the same judgment the same way every week.
+I used simple arithmetic and basic statistics to surface what the raw table
+hides, and put it in a script so the same judgment gets made the same way every
+week.
 
 Arithmetic finds problems that reading cannot. One row this week has 8 accepted
-outputs plus 12 flagged out of 17 completed runs, which is impossible, and that
-identifies it as broken without anyone knowing what happened that day.
+outputs plus 12 flagged out of 17 completed runs, which cannot happen, and that
+marks it as broken without anyone needing to know what happened that day.
 
 Statistics answers a question the raw numbers cannot. Acceptance for Lead summary
 rose 1.3 points after the change. Whether that means anything depends on how many
-runs it came from, and that is a calculation rather than an opinion.
+runs it was measured from, and that is a calculation rather than an opinion.
 
 Each rule in the script replaces a judgment someone would otherwise make from
 memory:
@@ -46,7 +60,7 @@ memory:
 
 ## What it prints
 
-The default run is a short summary aimed at someone with two minutes:
+The default run is a short summary for someone with two minutes:
 
 ```
 SIGNALDESK WEEKLY CHECK          2026-08-01 to 2026-08-07          38 of 41 rows used
@@ -95,13 +109,11 @@ DO THIS WEEK
   Run with --detail for the checks, correlations and full health summary behind this.
 ```
 
-`--detail` prints that same summary followed by the working behind it: the nine
-data checks with every row they caught, the metric ranking with its correlations,
-the health summary split by source, and the target calculations.
+`--detail` prints that summary followed by the working behind it: the nine data
+checks with every row they caught, the metric ranking with its correlations, the
+health summary split by source, and the target calculations.
 
 ## How to read it
-
-Three things carry most of the meaning.
 
 **Rows used.** 38 of 41 this week. Rows are dropped for stated reasons, never
 because they look odd.
@@ -112,32 +124,33 @@ cannot be separated from nothing having happened.
 
 **The two acceptance rates.** Acceptance on finished runs asks whether an output
 was good. Acceptance on all runs asks whether a user who started got something
-usable. A large gap means runs are failing before they produce anything and the
-first number is hiding it.
+usable. A gap between them means runs are failing before they produce anything,
+and the first number is hiding it.
 
 ## What this week's data shows
 
-**Confidence does not track quality here.** Across all rows, confidence and
-acceptance move together at 0.71. Split by workflow and source, the relationship
-reverses in three of six groups. Automated sources carry both higher confidence
-and higher acceptance, so the combined figure reflects the source rather than the
-model. Confidence also moves with daily volume at 0.84 and rises on every day of
-the week.
+The summary above states the main conclusions. Three things behind them are worth
+knowing.
 
-**The prompt change cannot be evaluated with this data.** All three workflows
-moved less than their own margin. Holding the source mix fixed changes the
-picture by about a tenth of a point, so mix was not concealing an effect.
+**Why confidence is the metric I would trust least.** Across all rows, confidence
+and acceptance move together at 0.71. Split by workflow and source, the
+relationship reverses in three of six groups. Automated sources carry both higher
+confidence and higher acceptance, so the combined figure reflects the source
+rather than the model. Confidence also moves with daily volume at 0.84 and rises
+on every day of the week.
 
-**Minutes saved barely varies.** It moves 2 to 6 percent within each group across
-the whole week, which suggests a value assigned per workflow rather than measured.
+**Source mix was not hiding an effect.** Recomputing both periods with the split
+between automated and manual traffic held fixed changes the picture by about a
+tenth of a point, so the small movements are not a mix shift in disguise.
 
-**A third of Feedback clustering runs end without an output.** Completion via csv
-upload is 64.4 percent. Acceptance on finished runs is 67.7 percent and looks
-normal. On all runs started it is 43.6 percent.
+**Two things nobody asked about.** Minutes saved moves only 2 to 6 percent within
+each group across the whole week, which points to a value assigned per workflow
+rather than measured. And the Reply draft flag rate climbs from 12.5 to 16.2
+percent over six days, all of it before the review policy changed, with nothing
+in the export explaining it.
 
-**Reply draft flags rose before either change.** The flag rate goes from 12.5 to
-16.2 percent over six days, ending before the review policy changed. Nothing in
-the export explains it.
+All figures here describe the provided export. The script recomputes them on
+whatever file it is given.
 
 ## Choices made, and why
 
@@ -147,9 +160,38 @@ the export explains it.
 | A duplicate group is dropped entirely | Nothing identifies which copy is the real run, so keeping either would be a guess |
 | Notes read last, as a backstop | The arithmetic checks keep working when next week's notes are worded differently |
 | Dropped rows reused in one place | A row tied to a known event says something about what a metric means, though nothing about how the product performed. It is excluded from every rate |
-| Spike thresholds at 2x and 3x | Chosen, not derived. This week's demo row sits at 2.7x and is dropped by the duplicate check instead |
+| Spike thresholds at 2x and 3x | Chosen by me, not derived from the data. This week's demo row sits at 2.7x and is dropped by the duplicate check instead |
 | Metrics grouped into three tiers, not ranked one to six | The gaps between neighbouring ranks are smaller than the scoring can distinguish |
 | No imputation or resampling | Two values are missing out of 41 rows. Filling them cannot change any rate and would remove the record that they were missing |
+| Opportunity figures are upper bounds | They assume one group can reach a rate another group already reaches. Different inputs may not allow that, so they order the work rather than forecast it |
+
+## How the script is laid out
+
+Seven stages, in order:
+
+1. Load the CSV and normalise labels
+2. Run the nine checks, quarantine or flag each row, print section 1
+3. Score the six metrics and compute the evidence behind the ranking
+4. Compute rates by workflow and source for the health summary
+5. Compute the mix adjusted comparison, margins, data requirements and levers
+6. Render the summary view
+7. Render the detailed sections when --detail is set
+
+The file carries no comments by choice. Function names describe what each step
+does, and about 40 percent of the file is the text it prints, since a verdict
+without its reasoning is hard to act on.
+
+## What I chose not to build
+
+- No dashboard. The question is whether to trust these numbers, and a chart does
+  not answer that.
+- No model. There is no label to predict and 41 rows to predict it from.
+- No imputation or resampling. Reasoning in the choices table above.
+- No per user analysis. The export has no user or run identifier, so sessions
+  cannot be separated from users. That is a data request rather than something to
+  work around.
+- Nothing beyond a summary and a detail flag. The brief asked for one small
+  useful artifact and I stopped there.
 
 ## Problems found in the export
 
@@ -162,7 +204,7 @@ the export explains it.
 | 2026-08-05 | `median_confidence` holds the text `n/a` |
 | 2026-08-01 | One `user_rating` is empty |
 
-## What to do next
+## What I would do next
 
 1. Split `flagged_for_review` into flags raised by a person and flags raised by
    policy. Once a policy has changed, no analysis separates them after the fact.
@@ -192,7 +234,7 @@ python3 weekly_check.py --detail
 | `--min-effect` | `3.0` | Sets how many points of improvement would be worth acting on |
 
 Output is plain text on stdout. Nothing is written to disk and the input file is
-not modified.
+not modified. Runs in about a second on pandas, numpy and scipy.
 
 ## Terms used above
 
@@ -202,9 +244,3 @@ not modified.
 | Rank correlation | Rank the rows by two columns and see whether the orders agree. +1 is identical, 0 is unrelated, -1 is reversed |
 | Overall against within group | Whether a pattern holds when all rows are combined, and whether it still holds inside each group. When the two disagree, the combined figure is usually reflecting the grouping |
 | Source mix held fixed | Recomputing both periods as though the split between automated and manual traffic had not moved, so that shift cannot be mistaken for the prompt working |
-
-## Scope
-
-The data is `sample-data/product_usage_events.csv`, provided with the challenge.
-No dashboard, no model, no stored state. Runs in about a second on pandas, numpy
-and scipy.
