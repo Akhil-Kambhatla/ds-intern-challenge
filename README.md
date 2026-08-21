@@ -1,133 +1,207 @@
 # SignalDesk weekly check
 
-A command line script that reads one week of SignalDesk usage data and tells you
-which numbers in it you should not trust, before you use them to make a call.
+A script that reads one week of SignalDesk usage data and answers one question:
+**how much of this can you actually believe?**
 
-## Who this is for
+Run it, read the output, and you will know which numbers are safe to act on,
+which ones are lying to you, and what you would need before you could call the
+prompt change a win.
 
-The product teammate who owns SignalDesk and has to decide whether the prompt
-change on 2026-08-04 worked. It is meant to be run once a week against a fresh
-export.
+---
+
+## The situation
+
+The SignalDesk team changed a prompt on 2026-08-04 and changed a review policy
+on 2026-08-07. They have seven days of usage data and want to know whether any
+of it went well.
+
+The data does not make that easy. Some rows are not real. Some columns look like
+quality signals and are not. And the change happened three days into a seven day
+window, which is not much to work with.
+
+---
+
+## What we built, and why it is a script
+
+**We built a repeatable weekly check, not a one-off analysis.**
+
+A notebook answers this week. Next week someone opens it, changes a date, and
+quietly re-decides which rows to drop and which numbers to believe. Those
+decisions get made differently every time, by whoever is holding the file.
+
+A script makes the decisions once and applies them the same way forever. That is
+the whole reason there is arithmetic and statistics in here. The math is not for
+show. Each rule replaces a judgment a person would otherwise have to make by eye:
+
+| Judgment a person would make weekly | What the script does instead |
+|---|---|
+| "This row looks wrong, I'll drop it" | Nine fixed checks, each printing why a row was dropped |
+| "Confidence seems fine to me" | Correlates confidence against acceptance, pooled and within group, and reports the disagreement |
+| "That looks like an improvement" | Compares the change against the noise band for that sample size |
+| "Let's just try harder on quality" | Ranks every workflow by how many accepted outputs a fix would actually add |
+
+Same input, same verdict, every time, with the reasoning printed next to it.
+
+---
+
+## What a clean week would look like, and what this week looks like
+
+| What we check | A week you can trust | This week | |
+|---|---|---|---|
+| Rows surviving the checks | 41 of 41 | 38 of 41 | fail |
+| Duplicate rows | 0 | 2 | fail |
+| Arithmetically impossible rows | 0 | 1 | fail |
+| Days with all 6 rows present | 7 of 7 | 6 of 7 | fail |
+| Confidence agrees with acceptance inside each group | same direction everywhere | reverses in 3 of 6 groups | fail |
+| Confidence tracks quality, not traffic | near 0 against volume | 0.84 against volume | fail |
+| Minutes saved moves day to day | it varies | barely moves, 2 to 6 percent | fail |
+| Worst completion rate | 80 percent or better | 64 percent | fail |
+| Change big enough to read | bigger than the noise band | 1.3 points against a band of 8.7 | fail |
+
+Nine checks, nine failures. That is the honest headline, and it is why the
+answer to "did the prompt work" is not yes or no but **not yet knowable**.
+
+---
+
+## Could the prompt change have worked?
+
+Yes. It also could have done nothing, or made things slightly worse. The data
+cannot separate those three. Here is the gap, using Lead summary:
+
+| | This week's export | What a readable result needs |
+|---|---|---|
+| Completed runs before the change | 154 | about 3,000 |
+| Completed runs after the change | 196 | about 3,000 |
+| Days of data on each side | 3 and 4 | about 63 |
+| Change in acceptance observed | +1.3 points | +3.0 points |
+| Noise band at that sample size | 8.7 points | 2.1 points |
+| Can you call it? | No, the change is 7 times smaller than the noise | Yes, comfortably |
+
+The gap is not small. It is a factor of fifteen in data volume. Nothing in the
+analysis closes it, which is worth knowing before someone builds a roadmap on
+this week's numbers.
+
+---
+
+## The five things worth telling the team
+
+**1. Model confidence is the least trustworthy number in the file.**
+Pooled across all rows it appears to track quality closely. Split by source, the
+relationship reverses in half the groups. Automated sources simply have both
+higher confidence and higher acceptance, so pooling them measures the source, not
+the model. Confidence also rises with daily traffic and climbs every day of the
+week, which means it is following the calendar.
+
+**2. The prompt change is not measurable yet.**
+All three workflows moved less than their own noise. Adjusting for source mix
+moves the picture by a tenth of a point, so mix was not hiding anything either.
+
+**3. Minutes saved is close to a fixed number.**
+It varies by 2 to 6 percent inside each group across the whole week. Real time
+savings would move around more than that. Anything multiplied by it is really
+just a volume ranking wearing a disguise.
+
+**4. A third of Feedback clustering runs never produce anything.**
+Completion via csv upload is 64 percent. Acceptance measured on finished runs
+reads 67 percent and looks normal. Measured on runs started it is 44 percent. The
+usual denominator hides every failure.
+
+**5. Reply draft flags were rising before anything changed.**
+The flag rate climbs from 12.5 to 16.2 percent over six days, all of it before
+the review policy changed. Nobody has explained this one.
+
+---
+
+## The biggest opportunity in the product
+
+Not the prompt. Completion on Feedback clustering via csv upload:
+
+| Workflow and source | Accepted per week now | If completion matched the best in the product | If acceptance did too |
+|---|---|---|---|
+| Feedback clustering / csv upload | 65 | +20 | +36 |
+| Lead summary / manual | 69 | +14 | +26 |
+| Reply draft / manual | 41 | +6 | +16 |
+
+The targets are rates already being hit elsewhere inside SignalDesk, so they are
+known to be reachable rather than invented.
+
+---
 
 ## Run it
+
 pip install -r requirements.txt
 python3 weekly_check.py
 
-Options:
-python3 weekly_check.py --data sample-data/product_usage_events.csv
-python3 weekly_check.py --change-date 2026-08-04
-python3 weekly_check.py --min-effect 3.0
 
-Output is plain text on stdout. Nothing is written to disk and the input file is
-never modified.
+| Option | Default | What it does |
+|---|---|---|
+| `--data` | `sample-data/product_usage_events.csv` | Points at a different export |
+| `--change-date` | `2026-08-04` | Splits before and after at a different date |
+| `--min-effect` | `3.0` | How many points of improvement would be worth acting on |
 
-## Data
+Plain text to stdout. Nothing written to disk, and the input file is never
+touched.
 
-`sample-data/product_usage_events.csv`, provided with the challenge. 41 rows
-covering 2026-08-01 to 2026-08-07. One row is one day, one team, one workflow,
-one source, across three workflows with two sources each.
+---
 
-## What it prints
+## Choices we made, and why
 
-1. **Data trust report.** Nine checks. Five quarantine a row and exclude it from
-   everything downstream. Four flag a row and keep it. The arithmetic and
-   structure checks run first and stand alone, so they still work next week when
-   the notes column is worded differently. The keyword scan of the notes is a
-   backstop and the output says so.
-2. **Metric trust ranking.** Six metrics scored on completeness, provenance,
-   direction clarity, agreement with an independent signal, and whether they move
-   at all. The ranking is computed rather than written in, and the evidence
-   behind it is printed underneath.
-3. **Weekly health summary.** Every rate shown split by source, never pooled on
-   its own, with both acceptance denominators side by side.
-4. **Targets.** A mix adjusted before and after comparison, how big a change
-   would have to be before this volume of data could see it, which field has the
-   most room to move, and a pre-registered threshold per workflow.
+| Choice | Why |
+|---|---|
+| Report both acceptance denominators | Acceptance on finished runs asks if an output was good. Acceptance on all runs asks if a user got something. The second is the better health number and the gap between them is a finding in itself |
+| Quarantine a duplicate group entirely | Nothing in the export says which copy is the real run, so keeping either is a guess |
+| Reuse quarantined rows in one place only | A row from a known event is evidence about what a metric means, not about how the product performed. It is excluded from every rate |
+| Use notes as a backstop, not a detector | The arithmetic checks work next week when the notes are worded differently. A checker that only reads notes is not a checker |
+| Set spike thresholds at 2x and 3x | Chosen, not derived. This week's demo row sits at 2.7x and leaves through the duplicate check instead, which the output says out loud |
+| Group metrics into three tiers, not six ranks | The gaps between adjacent ranks are smaller than the scoring can resolve, so the tier is the claim |
+| No imputation, upsampling, or resampling | Two values are missing out of 41 rows. Filling them cannot move a rate and would hide the fact they are missing, which is the opposite of the point |
 
-## What it found
+---
 
-**Model confidence is the metric to trust least.** Across all clean rows, confidence
-and acceptance agree strongly, with a Spearman correlation of 0.71. Split the
-rows by workflow and source and the relationship reverses in three of the six
-groups. Automated sources carry both higher confidence and higher acceptance, so
-the pooled figure is measuring the source, not the model. Confidence also rises
-with session volume at 0.84, and rises monotonically across the week in nearly
-every group, which means it is tracking the calendar.
+## Problems found in the data
 
-**The prompt change cannot be called yet.** Acceptance moved 1.3 points for Lead
-summary, 0.2 for Reply draft, and down 1.1 for Feedback clustering. Every one of
-those sits inside its own noise band of 8.7, 8.4 and 16.9 points. Adjusting for
-source mix moves the picture by a tenth of a point. At a three point minimum
-effect, confirming a change would need roughly 63, 45 and 172 days of clean data
-per period at current volume. The team gave it three days before and four after.
+| Where | What is wrong |
+|---|---|
+| 2026-08-05, Lead summary, email | The same row appears twice, at 140 sessions against a normal day near 55, one copy noted as demo traffic |
+| 2026-08-07, Reply draft, queue | 8 accepted plus 12 flagged out of 17 completed, which cannot happen. Note says the policy changed mid-day |
+| 2026-08-07 | Four rows instead of six. Two source combinations missing |
+| 2026-08-02 | `product` in lowercase where every other row says `Product` |
+| 2026-08-05 | `median_confidence` holds the text `n/a` |
+| 2026-08-01 | `user_rating` is empty |
 
-**Minutes saved is closer to an assumption than a measurement.** Within each
-workflow and source, its coefficient of variation is between 0.02 and 0.06. It
-barely moves. Anything that multiplies by it is really just re-ranking by volume.
+---
 
-**A third of Feedback clustering runs never produce an output.** Completion for
-csv upload is 64.4%. Acceptance measured against completed runs reads 67.7%,
-which looks close to the other workflows. Measured against runs started it is
-43.6%. Same data, different question, and the usual denominator hides the failures.
-
-**Reply draft flags were climbing before the policy change.** The flag rate per
-completed output runs 12.5%, 13.1%, 14.1% across the three days before the new
-prompt, and reaches 16.2% by 08-06, all of it before the review policy changed on
-08-07. Nothing in the packet explains it.
-
-## Assumptions and judgment calls
-
-- **Acceptance denominator.** Both are printed. Acceptance over completed runs
-  answers whether a finished output was good. Acceptance over sessions answers
-  whether a user who started got something usable. The second is the better
-  product health number and the script says why.
-- **Sessions is excluded from the metric ranking**, because it is the exposure
-  denominator rather than an outcome.
-- **Quarantined rows are used in one place only.** They are excluded from every
-  rate, and retained for scoring how clearly a metric can be interpreted, since a
-  row tied to a known event is evidence about a metric's meaning rather than
-  about performance.
-- **The 2x and 3x spike boundaries are chosen, not derived.** This week's demo
-  row sits at 2.7x and leaves the analysis through the duplicate check instead.
-- **The scoring weights in the ranking are mine.** The gaps between adjacent
-  ranks are smaller than the scheme can resolve, so the output groups the metrics
-  into three tiers and states that the tier is the claim.
-- **No imputation, upsampling, or resampling.** Two values are missing out of 41
-  rows. Filling them would not move any rate and would hide the fact that they
-  are missing, which is the opposite of what a trust report is for. A sensitivity
-  line reports the headline rate with and without the flagged rows instead.
-
-## Issues found in the data
-
-- The same Lead summary row appears twice on 2026-08-05, at 140 sessions against
-  a normal day near 55, with one copy noted as demo account traffic.
-- The Reply draft row on 2026-08-07 has 8 accepted plus 12 flagged out of 17
-  completed, which is arithmetically impossible, and its note says the review
-  policy changed mid-day.
-- 2026-08-07 has four rows instead of six. Two source combinations are absent.
-- `product` appears in lowercase on 2026-08-02 while every other row uses
-  `Product`.
-- `median_confidence` holds the text `n/a` on 2026-08-05.
-- One `user_rating` is empty on 2026-08-01.
-
-## What I would do next
+## What we would do next
 
 1. **Split `flagged_for_review` into flags raised by a person and flags raised by
-   policy.** No amount of analysis recovers this after a policy change. It needs
-   a schema change before the next export.
-2. **Instrument what happens between session start and completion**, starting
-   with Feedback clustering via csv upload, where roughly 53 sessions a week end
-   with nothing.
+   policy.** No analysis recovers this after a policy change. It needs a schema
+   change before the next export.
+2. **Instrument the gap between session start and completion**, beginning with
+   Feedback clustering via csv upload, where roughly 53 sessions a week end with
+   nothing.
 3. **Find out where `avg_minutes_saved` comes from.** If it is a fixed number per
-   workflow, stop reporting it as a measurement.
+   workflow, stop calling it a measurement.
 4. **Explain the Reply draft flag climb** using the days before the policy change,
-   while that comparison is still valid.
-5. **Add a run identifier and a user identifier to the export**, so sessions can
-   be separated from users and retries become visible.
+   while that comparison still holds.
+5. **Add run and user identifiers to the export**, so sessions stop being confused
+   with users and retries become visible.
+
+---
+
+## Terms used above
+
+| Term | Plain meaning |
+|---|---|
+| Noise band | How much a rate wobbles on its own, given how many runs it was measured from. A change inside the band cannot be told apart from nothing |
+| Spearman correlation | Rank both columns and see if the orders agree. +1 is identical, 0 is unrelated, -1 is reversed |
+| Pooled versus within group | Whether a pattern holds when everything is thrown together, or still holds inside each group. When they disagree, the pooled version is usually measuring the grouping |
+| Mix adjustment | Recomputing both periods as if the split between automated and manual traffic had stayed fixed, so that shift cannot be mistaken for the prompt working |
+| Quarantined | Excluded from every calculation, with the reason printed |
+
+---
 
 ## Scope
 
-Around 40% of the file is the explanatory text it prints, since a trust report
-that states a verdict without its reasoning is not much use. There is no
-dashboard, no model, and no stored state. It runs in about a second on pandas,
-numpy and scipy.
+About 40 percent of the file is the text it prints, because a verdict without its
+reasoning is not much use to the person reading it. No dashboard, no model, no
+stored state. Runs in about a second on pandas, numpy and scipy.
