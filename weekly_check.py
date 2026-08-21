@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import math
 
 import numpy as np
@@ -41,6 +43,14 @@ EXPECTED_COMBINATIONS = [
 ]
 EXPECTED_ROWS_PER_DATE = len(EXPECTED_COMBINATIONS)
 QUARANTINE_NOTE_KEYWORDS = ["duplicate", "demo", "test", "mid-day", "policy changed"]
+QUARANTINE_REASON_WORDS = {
+    "check 1": "a count is missing or impossible",
+    "check 2": "accepted plus flagged exceed completed runs",
+    "check 3": "the same row was exported twice",
+    "check 4": "sessions far above a normal day",
+    "check 5": "the note marks it as a known event",
+}
+TIER_LABELS = ["use", "use with care", "do not use"]
 SESSION_SPIKE_MULTIPLE = 3.0
 SESSION_FLAG_MULTIPLE = 2.0
 
@@ -92,6 +102,7 @@ def parse_arguments():
     parser.add_argument("--data", default=DEFAULT_DATA_PATH)
     parser.add_argument("--change-date", default=DEFAULT_CHANGE_DATE)
     parser.add_argument("--min-effect", type=float, default=DEFAULT_MIN_EFFECT_POINTS)
+    parser.add_argument("--detail", action="store_true")
     return parser.parse_args()
 
 
@@ -488,7 +499,32 @@ def run_data_trust_report(raw_table, normalized_table):
         )
     )
 
-    return clean_table, kept_flagged, quarantined, incomplete_dates
+    quarantine_reasons = {}
+    for index, reasons in quarantined.items():
+        ordered = [name for name in reasons if name != "check 5"] or reasons
+        quarantine_reasons[index] = QUARANTINE_REASON_WORDS[ordered[0]]
+
+    flag_notes = []
+    for index, column, raw_value, _ in mismatches:
+        if index in clean_table.index:
+            flag_notes.append(
+                "{0} '{1}' on {2}".format(column, raw_value, raw_table.loc[index, "date"])
+            )
+    for index, column, raw_value in unparseable:
+        if index in clean_table.index:
+            flag_notes.append(
+                "{0} holds '{1}' on {2}".format(column, raw_value, raw_table.loc[index, "date"])
+            )
+    for index, column in blanks:
+        if index in clean_table.index:
+            flag_notes.append("{0} empty on {1}".format(column, raw_table.loc[index, "date"]))
+    for index in spike_flags:
+        if index in clean_table.index:
+            flag_notes.append("session spike on {0}".format(raw_table.loc[index, "date"]))
+    for date, row_count, _ in incomplete_dates:
+        flag_notes.append("{0} has {1} of {2} rows".format(date, row_count, EXPECTED_ROWS_PER_DATE))
+
+    return clean_table, kept_flagged, quarantined, incomplete_dates, quarantine_reasons, flag_notes
 
 
 def group_label(workflow, source):
@@ -1107,6 +1143,9 @@ def run_targets(clean_table, change_date, min_effect_points):
             {
                 "label": group_label(row["workflow"], row["source"]),
                 "workflow": row["workflow"],
+                "source": row["source"],
+                "sessions": float(row["sessions"]),
+                "completed": float(row["completed"]),
                 "accepted": float(row["accepted_output"]),
                 "completion_rate": float(row["completion_rate"]),
                 "acceptance_rate": float(row["acceptance_rate"]),
@@ -1193,8 +1232,9 @@ def run_targets(clean_table, change_date, min_effect_points):
     return mix_results, detectability, opportunities, thresholds
 
 
-def print_what_to_check_next(
+def build_next_items(
     quarantined,
+    quarantine_reasons,
     incomplete_dates,
     scores,
     pooled_correlation,
@@ -1204,35 +1244,44 @@ def print_what_to_check_next(
     opportunities,
     thresholds,
 ):
-    print("=" * OUTPUT_WIDTH)
-    print("WHAT TO CHECK NEXT")
-    print("=" * OUTPUT_WIDTH)
-
     items = []
 
     if quarantined:
+        first_index = sorted(quarantined.keys())[0]
         items.append(
-            "{0} rows never reached the analysis. Ask the export owner two things: why 2026-08-05 "
-            "shipped the same Lead summary / email row twice, and whether the Reply draft / queue "
-            "row on 2026-08-07 is a real day or half a day, since its accepted plus flagged "
-            "exceeds its completed count, which is arithmetically impossible and needs no note to "
-            "prove it.".format(len(quarantined))
+            {
+                "long": "{0} rows never reached the analysis. Ask the export owner two things: why "
+                "2026-08-05 shipped the same Lead summary / email row twice, and whether the Reply "
+                "draft / queue row on 2026-08-07 is a real day or half a day, since its accepted "
+                "plus flagged exceeds its completed count, which is arithmetically impossible and "
+                "needs no note to prove it.".format(len(quarantined)),
+                "short": "Ask the export owner to account for the {0} dropped rows, starting with "
+                "the one where {1}.".format(len(quarantined), quarantine_reasons[first_index]),
+            }
         )
 
     inside_band = [name for name, figures in detectability.items() if figures["inside"]]
     if inside_band:
         first = inside_band[0]
         items.append(
-            "{0} moved {1:+.1f} points across the prompt change and the noise band is +/- {2:.1f} "
-            "points, so the move is indistinguishable from nothing. Do not report it as a result. "
-            "Hold the pre-registered threshold for {3} and re-run this script once {4:.0f} days of "
-            "clean post-change data exist.".format(
-                first,
-                100.0 * detectability[first]["observed"],
-                100.0 * detectability[first]["band"],
-                first,
-                thresholds[first]["days"] if first in thresholds else float("nan"),
-            )
+            {
+                "long": "{0} moved {1:+.1f} points across the prompt change and the noise band is "
+                "+/- {2:.1f} points, so the move is indistinguishable from nothing. Do not report "
+                "it as a result. Hold the pre-registered threshold for {3} and re-run this script "
+                "once {4:.0f} days of clean post-change data exist.".format(
+                    first,
+                    100.0 * detectability[first]["observed"],
+                    100.0 * detectability[first]["band"],
+                    first,
+                    thresholds[first]["days"] if first in thresholds else float("nan"),
+                ),
+                "short": "Do not report the {0:+.1f} point move on {1} as a result. Re-run once "
+                "{2:.0f} days of clean post-change data exist.".format(
+                    100.0 * detectability[first]["observed"],
+                    first,
+                    thresholds[first]["days"] if first in thresholds else float("nan"),
+                ),
+            }
         )
 
     bottom_metric = scores[-1]["metric"]
@@ -1241,37 +1290,60 @@ def print_what_to_check_next(
             1 for value in within_signs if np.sign(value) != np.sign(pooled_correlation)
         )
         items.append(
-            "{0} ranks last on trust this week. The pooled correlation between median_confidence "
-            "and acceptance disagrees in sign with {1} of {2} within-group correlations. Before "
-            "anyone "
-            "puts a confidence threshold into routing, pull a sample of high confidence rejected "
-            "outputs and check by hand whether confidence tracks correctness or just tracks the "
-            "source being automated.".format(bottom_metric, disagreeing, len(within_signs))
+            {
+                "long": "{0} ranks last on trust this week. The pooled correlation between "
+                "median_confidence and acceptance disagrees in sign with {1} of {2} within-group "
+                "correlations. Before anyone puts a confidence threshold into routing, pull a "
+                "sample of high confidence rejected outputs and check by hand whether confidence "
+                "tracks correctness or just tracks the source being automated.".format(
+                    bottom_metric, disagreeing, len(within_signs)
+                ),
+                "short": "Before any {0} threshold reaches routing, hand check a sample of high "
+                "confidence rejected outputs.".format(bottom_metric),
+            }
         )
     else:
         items.append(
-            "{0} ranks last on trust this week. Confirm with the owning team what it is actually "
-            "measuring before it appears in any decision.".format(bottom_metric)
+            {
+                "long": "{0} ranks last on trust this week. Confirm with the owning team what it "
+                "is actually measuring before it appears in any decision.".format(bottom_metric),
+                "short": "Confirm with the owning team what {0} actually measures before it "
+                "appears in any decision.".format(bottom_metric),
+            }
         )
 
     lowest = grouped_health.loc[grouped_health["completion_rate"].idxmin()]
     items.append(
-        "{0} has the worst completion rate at {1}, so roughly {2:.0f} sessions a week end with "
-        "nothing to accept. Instrument what happens between session start and completion for that "
-        "group; the acceptance rate on completed runs is currently hiding the whole failure.".format(
-            group_label(lowest["workflow"], lowest["source"]),
-            format_percent(lowest["completion_rate"]),
-            lowest["sessions"] - lowest["completed"],
-        )
+        {
+            "long": "{0} has the worst completion rate at {1}, so roughly {2:.0f} sessions a week "
+            "end with nothing to accept. Instrument what happens between session start and "
+            "completion for that group; the acceptance rate on completed runs is currently hiding "
+            "the whole failure.".format(
+                group_label(lowest["workflow"], lowest["source"]),
+                format_percent(lowest["completion_rate"]),
+                lowest["sessions"] - lowest["completed"],
+            ),
+            "short": "Instrument session start to completion for {0}, where about {1:.0f} sessions "
+            "a week end with nothing.".format(
+                group_label(lowest["workflow"], lowest["source"]),
+                lowest["sessions"] - lowest["completed"],
+            ),
+        }
     )
 
     if opportunities:
         top = opportunities[0]
         items.append(
-            "The largest single lever is {0}: about {1:.0f} more accepted outputs a week if it "
-            "reached both the best completion and best acceptance rate already achieved elsewhere "
-            "in the product. Check whether those best-in-product rates come from an easier input "
-            "mix before treating them as a target.".format(top["label"], top["gain_both"])
+            {
+                "long": "The largest single lever is {0}: about {1:.0f} more accepted outputs a "
+                "week if it reached both the best completion and best acceptance rate already "
+                "achieved elsewhere in the product. Check whether those best-in-product rates come "
+                "from an easier input mix before treating them as a target.".format(
+                    top["label"], top["gain_both"]
+                ),
+                "short": "Check whether the best-in-product rates behind the {0:.0f} output upside "
+                "on {1} come from an easier input mix.".format(top["gain_both"], top["label"]),
+            }
         )
 
     if incomplete_dates:
@@ -1280,52 +1352,274 @@ def print_what_to_check_next(
             group_label(workflow, source) for _, workflow, source in missing
         )
         items.append(
-            "{0} arrived with {1} rows instead of {2}. Absent: {3}. Confirm whether those runs did "
-            "not happen or did not export, because the two answers change every {0} number in this "
-            "report.".format(date, row_count, EXPECTED_ROWS_PER_DATE, missing_names)
+            {
+                "long": "{0} arrived with {1} rows instead of {2}. Absent: {3}. Confirm whether "
+                "those runs did not happen or did not export, because the two answers change every "
+                "{0} number in this report.".format(
+                    date, row_count, EXPECTED_ROWS_PER_DATE, missing_names
+                ),
+                "short": "Confirm whether the {0} rows absent from {1} did not happen or did not "
+                "export.".format(EXPECTED_ROWS_PER_DATE - row_count, date),
+            }
         )
 
-    for position, item in enumerate(items[:4], start=1):
-        wrap_and_print("{0}. {1}".format(position, item), "   ")
+    return items[:4]
+
+
+def print_what_to_check_next(items):
+    print("=" * OUTPUT_WIDTH)
+    print("WHAT TO CHECK NEXT")
+    print("=" * OUTPUT_WIDTH)
+
+    for position, item in enumerate(items, start=1):
+        wrap_and_print("{0}. {1}".format(position, item["long"]), "   ")
         print("")
+
+
+def tier_reason(entry):
+    options = [
+        (entry["direction"], "its direction is unclear on the rows tied to a known event"),
+        (entry["agreement"], "it agrees only weakly with acceptance"),
+        (entry["variation"], "it barely moves day to day"),
+        (entry["provenance_score"], "it is not directly observed"),
+    ]
+    options.sort(key=lambda option: option[0])
+    return options[0][1]
+
+
+def print_summary(
+    arguments,
+    raw_table,
+    clean_table,
+    quarantined,
+    quarantine_reasons,
+    flag_notes,
+    scores,
+    pooled_correlation,
+    within_signs,
+    grouped_health,
+    detectability,
+    opportunities,
+    thresholds,
+    next_items,
+):
+    print(
+        "{0}{1}{2}".format(
+            "SIGNALDESK WEEKLY CHECK".ljust(33),
+            "{0} to {1}".format(raw_table["date"].min(), raw_table["date"].max()).ljust(34),
+            "{0} of {1} rows used".format(len(clean_table), len(raw_table)),
+        )
+    )
+
+    print("")
+    print("VERDICT")
+    outside = [
+        name
+        for name in KNOWN_WORKFLOWS
+        if name in detectability and not detectability[name]["inside"]
+    ]
+    if outside:
+        figures = detectability[outside[0]]
+        wrap_and_print(
+            "  {0} moved {1} {2:.1f} points, outside its {3:.1f} point margin, so it is the one "
+            "workflow the change on {4} can be called for.".format(
+                outside[0],
+                "up" if figures["observed"] > 0 else "down",
+                abs(100.0 * figures["observed"]),
+                100.0 * figures["band"],
+                arguments.change_date,
+            )
+        )
+    else:
+        wrap_and_print(
+            "  The change on {0} cannot be called either way: all {1} workflows moved less than "
+            "their own margin of error.".format(arguments.change_date, len(detectability))
+        )
+    bottom_tier = [
+        entry["metric"] for entry in scores if tier_for_total(entry["total"]) == TRUST_TIERS[-1][0]
+    ]
+    disagreeing = 0
+    if within_signs and not math.isnan(pooled_correlation):
+        disagreeing = sum(
+            1 for value in within_signs if np.sign(value) != np.sign(pooled_correlation)
+        )
+    if "median_confidence" in bottom_tier and disagreeing >= len(within_signs) / 2.0:
+        wrap_and_print(
+            "  Do not report the median_confidence rise as evidence the change worked: it "
+            "disagrees with acceptance in {0} of {1} groups and tracks traffic, not "
+            "quality.".format(disagreeing, len(within_signs))
+        )
+    elif bottom_tier:
+        wrap_and_print(
+            "  Do not build decisions on {0}: it sits in the bottom trust tier this "
+            "week.".format(", ".join(bottom_tier))
+        )
+
+    print("")
+    print("DID THE PROMPT CHANGE WORK")
+    print(
+        "  {0:<22}{1:<20}{2:>9}{3:>10}{4:>12}".format(
+            "workflow", "acceptance", "change", "margin", "readable"
+        )
+    )
+    for workflow in KNOWN_WORKFLOWS:
+        if workflow not in detectability:
+            continue
+        figures = detectability[workflow]
+        print(
+            "  {0:<22}{1:<20}{2:>9}{3:>10}{4:>12}".format(
+                workflow,
+                "{0} -> {1}".format(
+                    format_percent(figures["rate_before"]), format_percent(figures["rate_after"])
+                ),
+                "{0:+.1f}pt".format(100.0 * figures["observed"]),
+                "{0:.1f}pt".format(100.0 * figures["band"]),
+                "no" if figures["inside"] else "yes",
+            )
+        )
+    needed = ", ".join(
+        "{0:.0f}".format(thresholds[workflow]["days"])
+        for workflow in KNOWN_WORKFLOWS
+        if workflow in thresholds
+    )
+    wrap_and_print(
+        "  Clean days per period needed at a {0:.1f} point minimum effect: {1}, in the row order "
+        "above.".format(arguments.min_effect, needed)
+    )
+    before_days = clean_table[clean_table["date"] < arguments.change_date]["date"].nunique()
+    after_days = clean_table[clean_table["date"] >= arguments.change_date]["date"].nunique()
+    print(
+        "  This export holds {0} days before {1} and {2} after.".format(
+            before_days, arguments.change_date, after_days
+        )
+    )
+
+    print("")
+    print("WHICH NUMBERS TO USE")
+    for position, tier in enumerate(TRUST_TIERS):
+        members = [entry for entry in scores if tier_for_total(entry["total"]) == tier[0]]
+        if not members:
+            continue
+        names = ", ".join(entry["metric"] for entry in members)
+        if position == 1:
+            names = "{0}, {1}".format(names, tier_reason(members[0]))
+        line = "  {0:<15}{1}".format(TIER_LABELS[position], names)
+        if len(line) <= OUTPUT_WIDTH:
+            print(line)
+        else:
+            wrap_and_print(line)
+
+    print("")
+    print("BIGGEST OPPORTUNITY, AND IT IS NOT THE PROMPT")
+    top = opportunities[0]
+    health_row = grouped_health[
+        (grouped_health["workflow"] == top["workflow"])
+        & (grouped_health["source"] == top["source"])
+    ].iloc[0]
+    wrap_and_print(
+        "  {0} completes {1} of sessions: about {2:.0f} a week end with nothing.".format(
+            top["label"], format_percent(top["completion_rate"]), top["sessions"] - top["completed"]
+        )
+    )
+    wrap_and_print(
+        "  Acceptance on completed runs reads {0} and hides them. On sessions started it is "
+        "{1}.".format(
+            format_percent(health_row["acceptance_of_completed"]),
+            format_percent(health_row["acceptance_of_sessions"]),
+        )
+    )
+    wrap_and_print(
+        "  Lifting completion to the best rate in the product adds about {0:.0f} accepted outputs "
+        "a week.".format(top["gain_completion"])
+    )
+
+    print("")
+    print("EXPORT PROBLEMS TO RAISE WITH THE DATA OWNER")
+    for index in sorted(quarantined.keys()):
+        row = raw_table.loc[index]
+        print(
+            "  {0}  {1:<34}{2}".format(
+                row["date"], group_label(row["workflow"], row["source"]), quarantine_reasons[index]
+            )
+        )
+    if flag_notes:
+        wrap_and_print(
+            "  {0} more issues flagged and kept: {1}.".format(
+                len(flag_notes), "; ".join(flag_notes)
+            )
+        )
+
+    print("")
+    print("DO THIS WEEK")
+    for position, item in enumerate(next_items, start=1):
+        wrap_and_print("{0}. {1}".format(position, item["short"]), "  ")
+
+    print("")
+    print("  Run with --detail for the checks, correlations and full health summary behind this.")
 
 
 def main():
     arguments = parse_arguments()
     raw_table = load_raw_table(arguments.data)
+    buffer = io.StringIO()
 
-    print("=" * OUTPUT_WIDTH)
-    print("SIGNALDESK WEEKLY CHECK")
-    print("=" * OUTPUT_WIDTH)
-    data_line = "  data file   : {0}".format(arguments.data)
-    if len(data_line) <= OUTPUT_WIDTH:
-        print(data_line)
-    else:
-        print("  data file   :")
-        wrap_and_print(arguments.data, "      ")
-    print("  change date : {0}".format(arguments.change_date))
-    print("  rows read   : {0}".format(len(raw_table)))
-    print("  date range  : {0} to {1}".format(raw_table["date"].min(), raw_table["date"].max()))
+    with contextlib.redirect_stdout(buffer):
+        print("=" * OUTPUT_WIDTH)
+        print("SIGNALDESK WEEKLY CHECK")
+        print("=" * OUTPUT_WIDTH)
+        data_line = "  data file   : {0}".format(arguments.data)
+        if len(data_line) <= OUTPUT_WIDTH:
+            print(data_line)
+        else:
+            print("  data file   :")
+            wrap_and_print(arguments.data, "      ")
+        print("  change date : {0}".format(arguments.change_date))
+        print("  rows read   : {0}".format(len(raw_table)))
+        print("  date range  : {0} to {1}".format(raw_table["date"].min(), raw_table["date"].max()))
 
-    normalized_table, _ = normalize_label_columns(raw_table)
-    normalized_table, _, _ = coerce_numeric_columns(normalized_table)
+        normalized_table, _ = normalize_label_columns(raw_table)
+        normalized_table, _, _ = coerce_numeric_columns(normalized_table)
 
-    clean_table, kept_flagged, quarantined, incomplete_dates = run_data_trust_report(
-        raw_table, normalized_table
-    )
-    quarantined_table = normalized_table.loc[sorted(quarantined.keys())]
-    scores, pooled_correlation, within_signs = run_metric_trust_ranking(
-        clean_table, quarantined_table, arguments.change_date
-    )
-    grouped_health, _ = run_weekly_health_summary(clean_table)
-    _, detectability, opportunities, thresholds = run_targets(
-        clean_table, arguments.change_date, arguments.min_effect
-    )
+        (
+            clean_table,
+            kept_flagged,
+            quarantined,
+            incomplete_dates,
+            quarantine_reasons,
+            flag_notes,
+        ) = run_data_trust_report(raw_table, normalized_table)
+        quarantined_table = normalized_table.loc[sorted(quarantined.keys())]
+        scores, pooled_correlation, within_signs = run_metric_trust_ranking(
+            clean_table, quarantined_table, arguments.change_date
+        )
+        grouped_health, _ = run_weekly_health_summary(clean_table)
+        _, detectability, opportunities, thresholds = run_targets(
+            clean_table, arguments.change_date, arguments.min_effect
+        )
 
-    print("")
-    print_what_to_check_next(
+        next_items = build_next_items(
+            quarantined,
+            quarantine_reasons,
+            incomplete_dates,
+            scores,
+            pooled_correlation,
+            within_signs,
+            grouped_health,
+            detectability,
+            opportunities,
+            thresholds,
+        )
+
+        print("")
+        print_what_to_check_next(next_items)
+
+    print_summary(
+        arguments,
+        raw_table,
+        clean_table,
         quarantined,
-        incomplete_dates,
+        quarantine_reasons,
+        flag_notes,
         scores,
         pooled_correlation,
         within_signs,
@@ -1333,7 +1627,12 @@ def main():
         detectability,
         opportunities,
         thresholds,
+        next_items,
     )
+
+    if arguments.detail:
+        print("")
+        print(buffer.getvalue(), end="")
 
 
 if __name__ == "__main__":
