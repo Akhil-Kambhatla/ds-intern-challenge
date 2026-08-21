@@ -1,6 +1,6 @@
 # AI note
 
-I used AI heavily and deliberately throughout this.
+I used AI deliberately throughout this.
 
 ## Where it was used
 
