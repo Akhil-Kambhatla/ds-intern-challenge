@@ -42,6 +42,7 @@ EXPECTED_COMBINATIONS = [
 EXPECTED_ROWS_PER_DATE = len(EXPECTED_COMBINATIONS)
 QUARANTINE_NOTE_KEYWORDS = ["duplicate", "demo", "test", "mid-day", "policy changed"]
 SESSION_SPIKE_MULTIPLE = 3.0
+SESSION_FLAG_MULTIPLE = 2.0
 
 METRIC_PROVENANCE = {
     "sessions": "observed",
@@ -75,6 +76,13 @@ VARIATION_REFERENCE_CV = 0.20
 MINIMUM_PAIRS_FOR_CORRELATION = 4
 SENSITIVITY_TOLERANCE_POINTS = 1.0
 DETECTABLE_DELTAS = [0.03, 0.05]
+DEFAULT_MIN_EFFECT_POINTS = 3.0
+LONG_HORIZON_DAYS = 30
+TRUST_TIERS = [
+    ("Trustworthy", 4.00),
+    ("Use with care", 3.00),
+    ("Do not build decisions on this", None),
+]
 
 
 def parse_arguments():
@@ -83,6 +91,7 @@ def parse_arguments():
     )
     parser.add_argument("--data", default=DEFAULT_DATA_PATH)
     parser.add_argument("--change-date", default=DEFAULT_CHANGE_DATE)
+    parser.add_argument("--min-effect", type=float, default=DEFAULT_MIN_EFFECT_POINTS)
     return parser.parse_args()
 
 
@@ -267,7 +276,8 @@ def find_duplicate_groups(table):
 
 
 def find_session_spikes(table):
-    spikes = {}
+    quarantine = {}
+    flagged = {}
     for index, row in table.iterrows():
         if pd.isna(row["sessions"]):
             continue
@@ -279,11 +289,17 @@ def find_session_spikes(table):
         if len(peers) == 0:
             continue
         peer_median = float(np.median(peers))
-        if peer_median > 0 and row["sessions"] > SESSION_SPIKE_MULTIPLE * peer_median:
-            spikes[index] = "sessions {0:.0f} vs other-day median {1:.1f}".format(
-                row["sessions"], peer_median
-            )
-    return spikes
+        if peer_median <= 0:
+            continue
+        multiple = float(row["sessions"]) / peer_median
+        note = "sessions {0:.0f} vs other-day median {1:.1f}, {2:.1f}x".format(
+            row["sessions"], peer_median, multiple
+        )
+        if multiple >= SESSION_SPIKE_MULTIPLE:
+            quarantine[index] = note
+        elif multiple >= SESSION_FLAG_MULTIPLE:
+            flagged[index] = note
+    return quarantine, flagged
 
 
 def find_note_keyword_rows(table):
@@ -325,7 +341,7 @@ def run_data_trust_report(raw_table, normalized_table):
 
     impossible, over_completed = find_arithmetic_violations(normalized_table)
     duplicates = find_duplicate_groups(normalized_table)
-    spikes = find_session_spikes(normalized_table)
+    spikes, spike_flags = find_session_spikes(normalized_table)
     note_hits = find_note_keyword_rows(normalized_table)
 
     print_subheader("Quarantine checks (row is excluded from every later section)")
@@ -353,9 +369,8 @@ def run_data_trust_report(raw_table, normalized_table):
             "      ",
         )
     print(
-        "  [4] sessions > {0:.0f}x other-day median for the same workflow and source: {1} row(s)".format(
-            SESSION_SPIKE_MULTIPLE, len(spikes)
-        )
+        "  [4] sessions at or above {0:.0f}x the other-day median for the same workflow and "
+        "source: {1} row(s)".format(SESSION_SPIKE_MULTIPLE, len(spikes))
     )
     print_caught_rows(raw_table, spikes.keys(), spikes)
     print(
@@ -421,7 +436,23 @@ def run_data_trust_report(raw_table, normalized_table):
         for team, workflow, source in missing:
             print("          {0} / {1} / {2}".format(team, workflow, source))
 
+    print(
+        "  [10] sessions at or above {0:.0f}x but below {1:.0f}x the other-day median: {2} "
+        "row(s)".format(SESSION_FLAG_MULTIPLE, SESSION_SPIKE_MULTIPLE, len(spike_flags))
+    )
+    print_caught_rows(raw_table, spike_flags.keys(), spike_flags)
+    if [index for index in spike_flags if index in duplicates]:
+        wrap_and_print(
+            "The demo row this week sits in this middle band and leaves the analysis only because "
+            "the duplicate check caught it; on the spike check alone it would have been flagged "
+            "and kept. The 2x and 3x boundaries are a judgment call rather than something the data "
+            "derives, and a reader should know the verdict on that row rests on check 3.",
+            "      ",
+        )
+
     flagged_indexes = set()
+    for index in spike_flags:
+        flagged_indexes.add(index)
     for index, _, _, _ in mismatches:
         flagged_indexes.add(index)
     for index, _, _ in unparseable:
@@ -553,6 +584,13 @@ def score_agreement_and_sign_consistency(correlations):
     return agreement, sign_consistency
 
 
+def tier_for_total(total):
+    for name, bound in TRUST_TIERS:
+        if bound is None or total >= bound:
+            return name
+    return TRUST_TIERS[-1][0]
+
+
 def run_metric_trust_ranking(clean_table, quarantined_table, change_date):
     print_section_header(2, "METRIC TRUST RANKING")
     derived = add_derived_rates(clean_table)
@@ -622,6 +660,24 @@ def run_metric_trust_ranking(clean_table, quarantined_table, change_date):
         "agree = strength of that relationship against an independent signal. var = whether the "
         "metric moves day to day within a group at all."
     )
+    print("")
+    previous_bound = None
+    for name, bound in TRUST_TIERS:
+        members = [entry["metric"] for entry in scores if tier_for_total(entry["total"]) == name]
+        if bound is None:
+            span = "total below {0:.2f}".format(previous_bound)
+        elif previous_bound is None:
+            span = "total {0:.2f} and above".format(bound)
+        else:
+            span = "total {0:.2f} to {1:.2f}".format(bound, previous_bound)
+        wrap_and_print(
+            "  {0} ({1}): {2}".format(name, span, ", ".join(members) if members else "none")
+        )
+        previous_bound = bound
+    wrap_and_print(
+        "  The gaps between adjacent ranks inside a tier are smaller than this scoring scheme can "
+        "resolve, so the tier is the claim and the precise rank is not."
+    )
 
     print_subheader("How direction clarity was computed")
     header = "{0:<20} {1:<16} {2:>10} {3:>14} {4:>8}".format(
@@ -644,6 +700,12 @@ def run_metric_trust_ranking(clean_table, quarantined_table, change_date):
         "the rows quarantined in section 1. A metric that swings hard on a day whose note says the "
         "review policy changed does not have one clear meaning: a rise can be worse output, a "
         "stricter policy, or more careful users, and this week's data cannot separate them."
+    )
+    wrap_and_print(
+        "  Those rows are quarantined everywhere else and used here on purpose: a row tied to a "
+        "known event is evidence about what a metric means, not evidence about how the product "
+        "performed, so it is excluded from every rate in sections 1, 3 and 4 and kept only for "
+        "interpreting metric behaviour."
     )
 
     print_subheader("Evidence a: pooled Spearman, median_confidence vs acceptance rate")
@@ -710,12 +772,26 @@ def run_metric_trust_ranking(clean_table, quarantined_table, change_date):
         derived["median_confidence"], derived["sessions"]
     )
     print("  pooled: rho = {0}   n = {1}".format(format_number(volume_correlation), volume_size))
+    perfect = 0
+    group_count = 0
     for (workflow, source), group in derived.groupby(["workflow", "source"]):
         correlation, size = spearman_with_size(group["median_confidence"], group["sessions"])
         print(
             "  {0:<34} rho = {1:>6}   n = {2}".format(
                 group_label(workflow, source), format_number(correlation), size
             )
+        )
+        if not math.isnan(correlation):
+            group_count += 1
+            if round(correlation, 2) >= 1.00:
+                perfect += 1
+    if perfect:
+        wrap_and_print(
+            "  {0} of {1} groups return exactly 1.00, which is weaker evidence than it looks. Both "
+            "columns rise monotonically across seven consecutive days, and with six points a "
+            "perfect rank correlation only needs neither column to dip. The honest reading is that "
+            "confidence tracks the calendar and the traffic trend, not day to day output "
+            "quality.".format(perfect, group_count)
         )
     wrap_and_print(
         "  Confidence tracking volume is a reason for suspicion: a quality signal should not rise "
@@ -864,7 +940,7 @@ def period_totals(frame):
     }
 
 
-def run_targets(clean_table, change_date):
+def run_targets(clean_table, change_date, min_effect_points):
     print_section_header(4, "TARGETS")
     derived = add_derived_rates(clean_table)
     before = derived[derived["date"] < change_date]
@@ -1070,12 +1146,19 @@ def run_targets(clean_table, change_date):
     )
 
     print_subheader("Pre-registered thresholds, quotable as written")
+    wrap_and_print(
+        "  The bar is the minimum effect the team would act on, {0:.1f} points of acceptance, set "
+        "with --min-effect. That is a business choice rather than something this data decides. The "
+        "noise band is not the bar: it shrinks as data accumulates, so the band in part two "
+        "describes today's sample only.".format(min_effect_points)
+    )
+    print("")
+    margin = min_effect_points / 100.0
     thresholds = {}
     for workflow in KNOWN_WORKFLOWS:
         if workflow not in detectability:
             continue
         figures = detectability[workflow]
-        margin = max(DETECTABLE_DELTAS[0], figures["band"])
         target_rate = figures["rate_before"] + margin
         needed = 16.0 * figures["pooled"] * (1.0 - figures["pooled"]) / (margin * margin)
         days = (
@@ -1085,18 +1168,26 @@ def run_targets(clean_table, change_date):
         )
         thresholds[workflow] = {"target_rate": target_rate, "days": days, "margin": margin}
         wrap_and_print(
-            '  "{0} counts as a win only if acceptance of completed runs holds at or above {1} '
-            "(its pre-change rate of {2} plus the {3:.1f} point margin its own noise band demands) "
-            "across at least {4:.0f} days of clean post-change data, which is about {5:.0f} "
-            'completed runs. Anything smaller than that we cannot tell from noise."'.format(
+            '  "{0} counts as a win only if acceptance of completed runs holds at or above {1}, '
+            "its pre-change rate of {2} plus the {3:.1f} point minimum effect worth acting on. "
+            "Reading that needs about {4:.0f} days of clean post-change data at its current {5:.0f} "
+            "completed runs a day, roughly {6:.0f} completed runs, and until that much clean "
+            'post-change data exists the change cannot be called either way."'.format(
                 workflow,
                 format_percent(target_rate),
                 format_percent(figures["rate_before"]),
                 100.0 * margin,
                 days,
+                figures["completed_per_day"],
                 needed,
             )
         )
+        if days > LONG_HORIZON_DAYS:
+            wrap_and_print(
+                "  {0:.0f} days is longer than a month, so for {1} a rate comparison is the wrong "
+                "instrument at current volume: the team should read a sample of outputs by hand "
+                "instead.".format(days, workflow)
+            )
         print("")
 
     return mix_results, detectability, opportunities, thresholds
@@ -1227,7 +1318,9 @@ def main():
         clean_table, quarantined_table, arguments.change_date
     )
     grouped_health, _ = run_weekly_health_summary(clean_table)
-    _, detectability, opportunities, thresholds = run_targets(clean_table, arguments.change_date)
+    _, detectability, opportunities, thresholds = run_targets(
+        clean_table, arguments.change_date, arguments.min_effect
+    )
 
     print("")
     print_what_to_check_next(
